@@ -10,7 +10,7 @@ class YolopONNX(object):
         self,
         model_path='yolop-640-640.onnx',
         input_shape=(640, 640),
-        class_score_th=0.3,
+        score_th=0.3,
         nms_th=0.45,
         providers=['CPUExecutionProvider'],
     ):
@@ -18,7 +18,7 @@ class YolopONNX(object):
         self.input_shape = input_shape
 
         # 閾値
-        self.class_score_th = class_score_th
+        self.class_score_th = score_th
         self.nms_th = nms_th
 
         # モデル読み込み
