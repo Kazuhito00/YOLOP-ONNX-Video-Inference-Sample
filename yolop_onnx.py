@@ -50,7 +50,12 @@ class YolopONNX(object):
         )
 
         # NMS
-        bboxes = self._nms(det_out)[0]
+        bboxes = self._nms(
+            det_out,
+            conf_thres=self.class_score_th,
+            iou_thres=self.nms_th,
+            agnostic=False,
+        )[0]
 
         # バウンディングボックスの座標を元画像のスケールに変換
         bboxes[:, 0] -= dw
