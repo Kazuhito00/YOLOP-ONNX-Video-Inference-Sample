@@ -1,8 +1,8 @@
 import copy
+
 import cv2
-import argparse
-import onnxruntime
 import numpy as np
+import onnxruntime
 
 
 class YolopONNX(object):
@@ -28,96 +28,97 @@ class YolopONNX(object):
         )
 
     def inference(self, image):
-        height, width, _ = image.shape
+        # 前処理
+        rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        resize_rgb_image, r, dw, dh, new_unpad_w, new_unpad_h = self._resize_unscale(
+            rgb_image,
+            self.input_shape,
+        )
 
-        # convert to RGB
-        img_rgb = image[:, :, ::-1].copy()
+        input_image = resize_rgb_image.copy().astype(np.float32)
+        mean = [0.485, 0.456, 0.406]
+        std = [0.229, 0.224, 0.225]
+        input_image = (input_image / 255 - mean) / std
+        input_image = input_image.transpose(2, 0, 1)
+        input_image = np.expand_dims(input_image, axis=0)
+        input_image = input_image.astype('float32')
 
-        # resize & normalize
-        canvas, r, dw, dh, new_unpad_w, new_unpad_h = self._resize_unscale(
-            img_rgb, self.input_shape)
-
-        img = canvas.copy().astype(np.float32)  # (3,640,640) RGB
-        img /= 255.0
-        img[:, :, 0] -= 0.485
-        img[:, :, 1] -= 0.456
-        img[:, :, 2] -= 0.406
-        img[:, :, 0] /= 0.229
-        img[:, :, 1] /= 0.224
-        img[:, :, 2] /= 0.225
-
-        img = img.transpose(2, 0, 1)
-
-        img = np.expand_dims(img, 0)  # (1, 3,640,640)
-
-        # inference: (1,n,6) (1,2,640,640) (1,2,640,640)
-        det_out, da_seg_out, ll_seg_out = self.onnx_session.run(
+        # 推論
+        det_out, drive_area_seg, lane_line_seg = self.onnx_session.run(
             ['det_out', 'drive_area_seg', 'lane_line_seg'],
-            input_feed={"images": img})
+            input_feed={"images": input_image},
+        )
 
-        # det_out = torch.from_numpy(det_out).float()
-        boxes = self._nms(det_out)[0]  # [n,6] [x1,y1,x2,y2,conf,cls]
-        # boxes = boxes.cpu().numpy().astype(np.float32)
+        # NMS
+        bboxes = self._nms(det_out)[0]
 
-        # scale coords to original size.
-        boxes[:, 0] -= dw
-        boxes[:, 1] -= dh
-        boxes[:, 2] -= dw
-        boxes[:, 3] -= dh
-        boxes[:, :4] /= r
+        # バウンディングボックスの座標を元画像のスケールに変換
+        bboxes[:, 0] -= dw
+        bboxes[:, 1] -= dh
+        bboxes[:, 2] -= dw
+        bboxes[:, 3] -= dh
+        bboxes[:, :4] /= r
 
-        img_det = img_rgb[:, :, ::-1].copy()
-        for i in range(boxes.shape[0]):
-            x1, y1, x2, y2, conf, label = boxes[i]
-            x1, y1, x2, y2, label = int(x1), int(y1), int(x2), int(y2), int(
-                label)
-            img_det = cv2.rectangle(img_det, (x1, y1), (x2, y2), (0, 255, 0),
-                                    2, 2)
+        # 各セグメンテーション領域を選択する
+        drive_area_seg = drive_area_seg[:, :, dh:dh + new_unpad_h,
+                                        dw:dw + new_unpad_w]
+        lane_line_seg = lane_line_seg[:, :, dh:dh + new_unpad_h,
+                                      dw:dw + new_unpad_w]
 
-        # select da & ll segment area.
-        da_seg_out = da_seg_out[:, :, dh:dh + new_unpad_h, dw:dw + new_unpad_w]
-        ll_seg_out = ll_seg_out[:, :, dh:dh + new_unpad_h, dw:dw + new_unpad_w]
+        drive_area_seg_mask = np.argmax(drive_area_seg, axis=1)[0]
+        lane_line_seg_mask = np.argmax(lane_line_seg, axis=1)[0]
 
-        da_seg_mask = np.argmax(da_seg_out, axis=1)[0]  # (?,?) (0|1)
-        ll_seg_mask = np.argmax(ll_seg_out, axis=1)[0]  # (?,?) (0|1)
+        return bboxes, drive_area_seg_mask, lane_line_seg_mask
 
-        color_area = np.zeros((new_unpad_h, new_unpad_w, 3), dtype=np.uint8)
-        color_area[da_seg_mask == 1] = [0, 255, 0]
-        color_area[ll_seg_mask == 1] = [255, 0, 0]
-        color_seg = color_area
+    def draw(
+        self,
+        image,
+        bboxes,
+        drive_area_seg_mask,
+        lane_line_seg_mask,
+    ):
+        image_height, image_width, _ = image.shape
+        debug_image = copy.deepcopy(image)
 
-        # convert to BGR
-        color_seg = color_seg[..., ::-1]
-        color_mask = np.mean(color_seg, 2)
-        img_merge = canvas[dh:dh + new_unpad_h, dw:dw + new_unpad_w, :]
-        img_merge = img_merge[:, :, ::-1]
+        # 道路セグメンテーション
+        bg_image = np.zeros(image.shape, dtype=np.uint8)
+        bg_image[:] = [0, 255, 0]
 
-        # merge: resize to original size
-        img_merge[color_mask != 0] = \
-            img_merge[color_mask != 0] * 0.5 + color_seg[color_mask != 0] * 0.5
-        img_merge = img_merge.astype(np.uint8)
-        img_merge = cv2.resize(img_merge, (width, height),
-                               interpolation=cv2.INTER_LINEAR)
-        for i in range(boxes.shape[0]):
-            x1, y1, x2, y2, conf, label = boxes[i]
-            x1, y1, x2, y2, label = int(x1), int(y1), int(x2), int(y2), int(
-                label)
-            img_merge = cv2.rectangle(img_merge, (x1, y1), (x2, y2),
-                                      (0, 255, 0), 2, 2)
+        mask = np.stack((drive_area_seg_mask, ) * 3, axis=-1).astype('uint8')
+        mask = cv2.resize(
+            mask,
+            dsize=(image_width, image_height),
+            interpolation=cv2.INTER_LINEAR,
+        )
+        mask = np.where(mask > 0.5, 0, 1)
 
-        # da: resize to original size
-        da_seg_mask = da_seg_mask * 255
-        da_seg_mask = da_seg_mask.astype(np.uint8)
-        da_seg_mask = cv2.resize(da_seg_mask, (width, height),
-                                 interpolation=cv2.INTER_LINEAR)
+        mask_image = np.where(mask, debug_image, bg_image)
+        debug_image = cv2.addWeighted(debug_image, 0.5, mask_image, 0.5, 1.0)
 
-        # ll: resize to original size
-        ll_seg_mask = ll_seg_mask * 255
-        ll_seg_mask = ll_seg_mask.astype(np.uint8)
-        ll_seg_mask = cv2.resize(ll_seg_mask, (width, height),
-                                 interpolation=cv2.INTER_LINEAR)
+        # レーンセグメンテーション
+        bg_image = np.zeros(image.shape, dtype=np.uint8)
+        bg_image[:] = [255, 0, 0]
 
-        return img_merge
+        mask = np.stack((lane_line_seg_mask, ) * 3, axis=-1).astype('uint8')
+        mask = cv2.resize(
+            mask,
+            dsize=(image_width, image_height),
+            interpolation=cv2.INTER_LINEAR,
+        )
+        mask = np.where(mask > 0.5, 0, 1)
+
+        mask_image = np.where(mask, debug_image, bg_image)
+        debug_image = cv2.addWeighted(debug_image, 0.5, mask_image, 0.5, 1.0)
+
+        # 車バウンディングボックス
+        for bbox in bboxes:
+            x1, y1 = int(bbox[0]), int(bbox[1])
+            x2, y2 = int(bbox[2]), int(bbox[3])
+            # score = bbox[4]
+            # class_id = int(bbox[5])
+            cv2.rectangle(debug_image, (x1, y1), (x2, y2), (0, 0, 255), 2, 2)
+
+        return debug_image
 
     def _xywh2xyxy(self, x):
         y = np.zeros_like(x)
@@ -214,8 +215,8 @@ class YolopONNX(object):
         if isinstance(new_shape, int):
             new_shape = (new_shape, new_shape)
 
-        canvas = np.zeros((new_shape[0], new_shape[1], 3))
-        canvas.fill(color)
+        resize_rgb_image = np.zeros((new_shape[0], new_shape[1], 3))
+        resize_rgb_image.fill(color)
         # Scale ratio (new / old) new_shape(h,w)
         r = min(new_shape[0] / shape[0], new_shape[1] / shape[1])
 
@@ -232,38 +233,39 @@ class YolopONNX(object):
         if shape[::-1] != new_unpad:  # resize
             img = cv2.resize(img, new_unpad, interpolation=cv2.INTER_AREA)
 
-        canvas[dh:dh + new_unpad_h, dw:dw + new_unpad_w, :] = img
+        resize_rgb_image[dh:dh + new_unpad_h, dw:dw + new_unpad_w, :] = img
 
-        return canvas, r, dw, dh, new_unpad_w, new_unpad_h  # (dw,dh)
+        return resize_rgb_image, r, dw, dh, new_unpad_w, new_unpad_h  # (dw,dh)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--weight', type=str, default="yolop-640-640.onnx")
-    args = parser.parse_args()
-
-    onnx_path = f"./weights/{args.weight}"
     yolop = YolopONNX(
-        onnx_path,
+        model_path='weights/yolop-640-640.onnx',
         input_shape=(640, 640),
         providers=['CUDAExecutionProvider', 'CPUExecutionProvider'],
     )
-    print(f"Load {onnx_path} done!")
 
-    cap = cv2.VideoCapture("video/sample.mp4")
+    video_capture = cv2.VideoCapture("video/sample.mp4")
+
     while True:
-        # Capture read
-        ret, frame = cap.read()
+        ret, frame = video_capture.read()
         if not ret:
             break
 
-        result_image = yolop.inference(frame)
+        bboxes, da_seg_mask, ll_seg_mask = yolop.inference(frame)
+        result_image = yolop.draw(
+            frame,
+            bboxes,
+            da_seg_mask,
+            ll_seg_mask,
+        )
 
         result_image = cv2.resize(result_image, dsize=None, fx=0.5, fy=0.5)
 
         cv2.imshow("YOLOP", result_image)
-        cv2.waitKey(1)
-
         key = cv2.waitKey(1)
         if key == 27:  # ESC
             break
+
+    video_capture.release()
+    cv2.destroyAllWindows()
