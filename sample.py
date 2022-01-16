@@ -1,3 +1,4 @@
+import time
 import argparse
 
 import cv2
@@ -65,12 +66,16 @@ if __name__ == "__main__":
     video_capture = cv2.VideoCapture(video_path)
 
     while True:
+        start_time = time.time()
+
         ret, frame = video_capture.read()
         if not ret:
             break
 
         # 推論
         bboxes, da_seg_mask, ll_seg_mask = yolop.inference(frame)
+
+        elapsed_time = time.time() - start_time
 
         # デバッグ描画
         result_image = yolop.draw(
@@ -79,6 +84,11 @@ if __name__ == "__main__":
             da_seg_mask,
             ll_seg_mask,
         )
+        cv2.putText(
+            result_image,
+            "Elapsed Time:" + '{:.1f}'.format(elapsed_time * 1000) + "ms",
+            (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2,
+            cv2.LINE_AA)
 
         cv2.imshow("YOLOP", result_image)
         key = cv2.waitKey(1)
