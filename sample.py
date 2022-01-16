@@ -90,8 +90,6 @@ if __name__ == "__main__":
             (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 0, 0), 2,
             cv2.LINE_AA)
 
-        result_image = cv2.resize(result_image, dsize=None, fx=0.5, fy=0.5)
-
         cv2.imshow("YOLOP", result_image)
         key = cv2.waitKey(1)
         if key == 27:  # ESC
