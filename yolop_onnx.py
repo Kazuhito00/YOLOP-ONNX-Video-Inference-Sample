@@ -177,17 +177,14 @@ class YolopONNX(object):
             box = self._xywh2xyxy(x[:, :4])
 
             # Detections matrix nx6 (xyxy, conf, cls)
-            # conf, j = x[:, 5:].max(1, keepdim=True)
             conf = copy.deepcopy(x[:, 5:])
             j = np.zeros((x[:, 5:].shape[0], 1))
-            # x = np.concatenate((box, conf, j), 1)[conf.view(-1) > conf_thres]
             x = np.concatenate((box, conf, j), 1)
 
             # Batched NMS
             c = x[:, 5:6] * (0 if agnostic else max_wh)  # classes
-            boxes, scores = x[:, :
-                              4] + c, x[:,
-                                        4]  # boxes (offset by class), scores
+            # boxes (offset by class), scores
+            boxes, scores = x[:, :4] + c, x[:, 4]
             i = cv2.dnn.NMSBoxes(
                 bboxes=boxes.tolist(),
                 scores=scores.tolist(),
@@ -197,19 +194,22 @@ class YolopONNX(object):
             )
             if len(i) > 0:
                 i = i.flatten()
-                if i.shape[0] > max_det:  # limit detections
+                # limit detections
+                if i.shape[0] > max_det:
                     i = i[:max_det]
-                if merge and (
-                        1 < n <
-                        3E3):  # Merge NMS (boxes merged using weighted mean)
+                # Merge NMS (boxes merged using weighted mean)
+                if merge and (1 < n < 3E3):
                     # update boxes as boxes(i,4) = weights(i,n) * boxes(n,4)
-                    iou = self._box_iou(boxes[i],
-                                        boxes) > iou_thres  # iou matrix
-                    weights = iou * scores[None]  # box weights
+                    # iou matrix
+                    iou = self._box_iou(boxes[i], boxes) > iou_thres
+                    # box weights
+                    weights = iou * scores[None]
+                    # merged boxes
                     x[i, :4] = np.dot(weights, x[:, :4]).float() / weights.sum(
-                        1, keepdim=True)  # merged boxes
+                        1, keepdim=True)
                     if redundant:
-                        i = i[iou.sum(1) > 1]  # require redundancy
+                        # require redundancy
+                        i = i[iou.sum(1) > 1]
 
                 output[xi] = x[i]
 
